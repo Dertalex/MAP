@@ -83,6 +83,6 @@ def main():
 
 
 if __name__ == '__main__':
-    print(generate_one_hot_encoding("AACKS"))
-    print(generate_blosum_encoding("AACKS",62))
+    print(generate_sequence_encodings(method="one_hot", sequences=["ACDEFGHIKLMNPQRSTVWY", "ACDEFGHIMLKMNPQRSTVWY"]))
+    print(generate_sequence_encodings(method="blosum62", sequences=["ACDEFGHIKLMNPQRSTVWY", "ACDEFGHIMLKMNPQRSTVWY"]))
 
