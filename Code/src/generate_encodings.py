@@ -1,12 +1,13 @@
 import math
 import os
 import warnings
-
 import numpy as np
 from typing import Literal, Optional
 import src.Blosum as bl
 import src.georgiev_parameters as gg
-
+import torch
+from torch_geometric.data import Data
+from Bio.PDB import PDBParser
 
 ''' structural graph encoding'''
 
@@ -14,7 +15,7 @@ def generate_graph_encoding(pdb_file,
                             y, 
                             features: Literal["one_hot", "georgiev", "blosum45", "blosum50",
                                             "blosum62", "blosum80", "blosum90"], 
-                            distance_threshold: float = 8.0) -> torch_geometric.data.Data:
+                            distance_threshold: float = 8.0) -> Data:
 
     import torch
     from torch_geometric.data import Data

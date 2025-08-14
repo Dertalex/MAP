@@ -214,7 +214,10 @@ class Sequential_Optimizer:
         return spearman
 
     def _execute_optimization(self, study_name, group, n_trials, params=dict()):
-        study = optuna.create_study(study_name=study_name, directions=self._direction, storage=f"sqlite:///optuna_study-{self._db_name}.db")
+        study = optuna.create_study(study_name=study_name, 
+                                    directions=self._direction,
+                                    # pruner=optuna.pruners.SuccessiveHalvingPruner(), 
+                                    storage=f"sqlite:///optuna_study-{self._db_name}.db")
         study.optimize(lambda trial: self._objective(trial, group, params), n_trials=n_trials, show_progress_bar=False)
         studys_best_trial = sorted(study.best_trials, key=lambda t: t.values[0])[0] #ranking by Spearman Coefficient
 

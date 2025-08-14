@@ -77,8 +77,8 @@ logging.basicConfig(
 # Logging...
 logging.info("============================== MLDE Benchmark Log ==============================")
 logging.info(f"Benchmark ID: {benchmark_ID}")
-logging.info(f"Timestamp: {timestamp}")
-logging.info("")
+logging.info(f"Timestamp: {timestamp}\n")
+
 
 # prepare Dataset and Embeddings
 if repr_type not in ["esmc_600m", "esmc300m"]:
@@ -208,7 +208,7 @@ else:
     try:
         os.remove(f"optuna_study-{benchmark_ID}_0.db")
     except Exception as e:
-        logging.warning(f"[WARNING] Could not remove Optuna Database for initial Hyper-Parameter Tuning: {e}")
+        logging.warning(f" Could not remove Optuna Database for initial Hyper-Parameter Tuning: {e}")
         pass
 
     initial_tuning_time = time.time() - initialization_time_stamp
@@ -307,7 +307,6 @@ for i in range(1, n_cycles + 1):
 
     logging.info(f"Interference-Performance on all remaining datapoints (incl. Out of Distribution Prediction):\n"
                  f"Spearman: {test_Spearman}, (NDCG {test_NDCG}, Pearson: {test_Pearson}, R2: {test_R2}, MSE: {test_MSE})\n")
-    logging.info("\n")
 
     top_predictions = sorted([(isxy, y_head) for isxy, y_head in zip(remaining_data, list_predictions)],
                              key=lambda tuple: tuple[1], reverse=True)[:n_gain]
@@ -321,8 +320,7 @@ for i in range(1, n_cycles + 1):
             finished = True
         iterations_scored_mutants.append(f"{target[0][0]}, {round(float(target[1]), 3)}, {target[0][3]}")
     scored_mutants.append(iterations_scored_mutants)
-    logging.info("\n")
-
+    # logging.info("================================================================================\n")
     train_performances.append(f'{train_NDCG, train_Spearman, train_Pearson, train_R2, train_MSE}')
     val_performances.append(f'{val_NDCG, val_Spearman, val_Pearson, val_R2, val_MSE}')
     test_performances.append(f'{test_NDCG, test_Spearman, test_Pearson, test_R2, test_MSE}')
@@ -330,9 +328,8 @@ for i in range(1, n_cycles + 1):
     if finished:
         cause_of_termination = "target score achieved successfully."
         cycle_train_and_interference_time_stamp = time.time()
-        logging.info(f" Duration of Cycle's Training and Interference: {proper_time(cycle_train_and_interference_time_stamp - cycle_start_time_stamp)}")
-        logging.info(f" Duration of Cycle {i} in total: {proper_time(time.time() - cycle_start_time_stamp)}\n")
-
+        logging.info(f"Duration of Cycle's Training and Interference: {proper_time(cycle_train_and_interference_time_stamp - cycle_start_time_stamp)}")
+        logging.info(f"Duration of Cycle {i} in total: {proper_time(time.time() - cycle_start_time_stamp)}\n")
         break
 
     current_highest_score = top_predictions[0][0][3]
@@ -345,8 +342,8 @@ for i in range(1, n_cycles + 1):
     if cycles_without_improvement >= n_cancel:
         cycle_train_and_interference_time_stamp = time.time()
         finished = False
-        logging.info(f" Duration of Cycle's Training and Interference: {proper_time(cycle_train_and_interference_time_stamp - cycle_start_time_stamp)}")
-        logging.info(f" Duration of Cycle {i} in total: {proper_time(time.time() - cycle_start_time_stamp)}\n")
+        logging.info(f"Duration of Cycle's Training and Interference: {proper_time(cycle_train_and_interference_time_stamp - cycle_start_time_stamp)}")
+        logging.info(f"Duration of Cycle {i} in total: {proper_time(time.time() - cycle_start_time_stamp)}\n")
         cause_of_termination = "stuck in local optimum. Plateau reached."
         break
 
@@ -402,15 +399,15 @@ for i in range(1, n_cycles + 1):
 
     cycle_finish_time_stamp = time.time()
 
-    logging.info(f" Hyperparameters updated." if params_updated else " Current Hyperparameters maintained.")
-    logging.info(f" Duration of Cycle's Training and Interference: {proper_time(cycle_train_and_interference_time)}")
-    logging.info(f" Duration of Cycle's Hyperparameter Tuning: {proper_time(cycle_finish_time_stamp - cycle_train_and_interference_time_stamp)}")
-    logging.info(f" Duration of Cycle {i} in total: {proper_time(cycle_finish_time_stamp - cycle_start_time_stamp)}\n")
+    logging.info(f"Hyperparameters updated." if params_updated else " Current Hyperparameters maintained.")
+    logging.info(f"Duration of Cycle's Training and Interference: {proper_time(cycle_train_and_interference_time)}")
+    logging.info(f"Duration of Cycle's Hyperparameter Tuning: {proper_time(cycle_finish_time_stamp - cycle_train_and_interference_time_stamp)}")
+    logging.info(f"Duration of Cycle {i} in total: {proper_time(cycle_finish_time_stamp - cycle_start_time_stamp)}\n")
 
 mlde_end_time_stamp = time.time()
 
 logging.info(f"MLDE-Performance-Ranking finished after {i}/{n_cycles} cycles {'successfully' if finished else 'without success'}.")
-logging.info(f" Duration of total MLDE-Benchmark: {proper_time(mlde_end_time_stamp - mlde_start_time_stamp)}\n")
+logging.info(f"Duration of total MLDE-Benchmark: {proper_time(mlde_end_time_stamp - mlde_start_time_stamp)}\n")
 
 ####################### Documenting the Results #######################
 

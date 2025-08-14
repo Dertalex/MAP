@@ -3,12 +3,18 @@ import os.path
 import random
 import warnings
 from datetime import datetime
-from typing import Literal, Optional
+from typing import Literal, Optional, List
 from joblib import parallel_backend
 import lightgbm as lgb
 import numpy as np
 import torch
+import torch
+import torch.nn.functional as F
 import torch.nn as nn
+from torch_geometric.data import Dataset, InMemoryDataset
+from torch_geometric.loader import DataLoader
+from torch_geometric.nn import GCNConv, global_mean_pool
+
 from lightgbm import early_stopping
 from sklearn import svm
 from sklearn.ensemble import RandomForestRegressor, AdaBoostRegressor
@@ -37,9 +43,35 @@ class GNNModel(nn.Module, hidden_channels=64, learning_rate=0.001):
         x = global_mean_pool(x, batch)
         return self.lin(x)
 
-def train_gnn():
-    dataset = []
-    pass
+def train_gnn(dataset: List[Dataset], split=(80, 20), batch_size=32, n_epochs=100, lr=0.001, loss_fn = nn.MarginRankingLoss(margin=1.0)):
+
+    train_loader = DataLoader(dataset[:split[0]], batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(dataset[split[0]:split[0]+split[1]], batch_size=batch_size, shuffle=True)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    model = GNNModel(in_channels=dataset.num_features, hidden_channels=64)
+    ranking_loss = loss_fn
+
+    for epoch in range(n_epochs):
+        model.train()
+        total_train_loss = 0
+        for batch in train_loader:
+            optimizer.zero_grad()
+            output = model(batch.x, batch.edge_index, batch.batch).squeeze()
+            train_loss = ranking_loss(output, batch.y)
+            train_loss.backward()
+            optimizer.step()
+            total_train_loss += train_loss.item()
+        
+        model.eval()
+        with torch.no_grad():
+            total_val_loss = 0
+            for batch in val_loader:
+                predictions = model(batch.x, batch.edge_index, batch.batch).squeeze()
+                val_loss = ranking_loss(predictions, batch.y)
+                total_val_loss += val_loss.item()
+
+        print(f'Epoch {epoch+1}/{n_epochs}, Train Loss: {total_train_loss:.4f}, Val Loss: {total_val_loss:.4f}')
+
 
 class ActivityPredictor:
     _is_hypertuned = False
