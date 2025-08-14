@@ -10,18 +10,15 @@ import src.georgiev_parameters as gg
 
 ''' structural graph encoding'''
 
-def generate_graph_encoding(features: Literal[
-    "one_hot", "georgiev", "blosum45", "blosum50", "blosum62", "blosum80",
-    "blosum90"]):
-    from Bio.PDB import PDBParser, is_aa
+def generate_graph_encoding(pdb_file, 
+                            y, 
+                            features: Literal["one_hot", "georgiev", "blosum45", "blosum50",
+                                            "blosum62", "blosum80", "blosum90"], 
+                            distance_threshold: float = 8.0) -> torch_geometric.data.Data:
+
     import torch
     from torch_geometric.data import Data
-
-    parser = PDBParser(QUIET=True)
-    structure = parser.get_structure("protein", "example.pdb")
-
-    model = structure[0]
-    chain = next(model.get_chains())
+    from Bio.PDB import PDBParser
 
     aa_codes = ['ALA', 'ARG', 'ASN', 'ASP', 'CYS', 'GLN', 'GLU', 'GLY', 'HIS', 'ILE',
                 'LEU', 'LYS', 'MET', 'PHE', 'PRO', 'SER', 'THR', 'TRP', 'TYR', 'VAL']
@@ -33,29 +30,57 @@ def generate_graph_encoding(features: Literal[
 
     aa_to_index = {aa: i for i, aa in enumerate(aa_codes)}
 
+
+    parser = PDBParser(QUIET=True)
+    structure = parser.get_structure("protein", "example.pdb")
+
     residues = []
     features = []
     res_coords = []
 
-    for idx, res in enumerate(chain):
-        if is_aa(res) and "CA" in res:
-            res_coords.append(res["CA"].coord)
-            f_vector = []
-            if features == "one_hot":
-                f_vector = np.zeros(len(aa_codes))
-                f_vector[aa_to_index[res.get_resname()]] = 1
+    for model in structure:
+        for chain in model:
+            for residue in chain:
+                if is_aa(residue) and "CA" in residue:
+                    res_coords.append(residue["CA"].coord)
 
-            elif features == "georgiev":
-                for parameter in gg.GEORGIEV_PARAMETERS:
-                    f_vector.append(parameter[res.get_resname()])
+                    #update features for every residue/node
+                    f_vector = []
+                    if features == "one_hot":
+                        f_vector = [np.zeros(len(aa_codes))]
+                        f_vector[aa_to_index[res.get_resname()]] = 1
 
-            elif features in ["blosum45", "blosum50", "blosum62", "blosum80", "blosum90"]:
-                bl_matrices = [bl.blosum_45, bl.blosum_50, bl.blosum_62, bl.blosum_80, bl.blosum_90]
-                blosum = bl_matrices[["blosum45", "blosum50", "blosum62", "blosum80", "blosum90"].index(features)]
-                for aa in aa_codes:
-                    f_vector.append(blosum[aa3to1[res.get_resname()]][aa3to1[aa]])
+                    elif features == "georgiev":
+                        for parameter in gg.GEORGIEV_PARAMETERS:
+                            f_vector.append(parameter[res.get_resname()])
 
-            features.append(f_vector)
+                    elif features in ["blosum45", "blosum50", "blosum62", "blosum80", "blosum90"]:
+                        bl_matrices = [bl.blosum_45, bl.blosum_50, bl.blosum_62, bl.blosum_80, bl.blosum_90]
+                        blosum = bl_matrices[["blosum45", "blosum50", "blosum62", "blosum80", "blosum90"].index(features)]
+                        for aa in aa_codes:
+                            f_vector.append(blosum[aa3to1[res.get_resname()]][aa3to1[aa]])
+
+                    features.append(f_vector)
+                else:
+                    raise ValueError(f"Invalid residue: {residue.get_resname()}")
+                
+    # Convert coordinates and features to tensors
+    coords_tensor = torch.tensor(res_coords, dtype=torch.float)
+    features_tensor = torch.tensor(features, dtype=torch.float)
+
+    # Create edges
+    edge_indeces = []
+    num_nodes = int(coords_tensor.shape[0])
+    for i in range(num_nodes):
+        for j in range(i + 1, num_nodes):
+            if torch.norm(coords_tensor[i] - coords_tensor[j]) < distance_threshold:
+                edge_indeces.append([i, j])
+                edge_indeces.append([j, i])
+
+    edges = torch.tensor(edge_indeces, dtype=torch.long).t().contiguous()
+
+    return Data(x=features_tensor, edge_index=edges)
+
 
 
 ''' sequence representation encodings'''

@@ -1,5 +1,6 @@
 import gc
 import src.prediction_models as pm
+import src.metrics as metrics
 from typing import Literal, Optional, Any
 import optuna
 from copy import copy
@@ -32,9 +33,8 @@ class HiddenWarnings:
 class Sequential_Optimizer:
     _model_type = None
     _cv_folds = 5
-    _direction = ["maximize", "minimize"]
+    _direction = ["maximize"]
     _n_trials = 500
-    _n_jobs = -1
     _early_stopping_fraction = False
     _x_arr = None
     _y_arr = None
@@ -42,12 +42,13 @@ class Sequential_Optimizer:
     _is_optimized = False
     _best_trial = None
     _best_params = None
+    _db_name = None
     _reversed_order = False
 
     def __init__(self,
                  model_type: Literal["rf", "xgboost", "gxboost_rf", "lightgbm", "svr", "adaboost", "ridge", "lasso"],
                  cv_folds, x_arr: list, y_arr: list, initial_params, trials_per_group: int,
-                 early_stopping_fraction: float, reverse_optimization_order: bool = False, n_jobs: int = -1):
+                 early_stopping_fraction: float, db_name: str, reverse_optimization_order: bool = False):
 
         self._model_type = model_type
         self._initial_params = initial_params
@@ -57,7 +58,7 @@ class Sequential_Optimizer:
         self._y_arr = y_arr
         self._early_stopping_fraction = early_stopping_fraction
         self._reversed_order = reverse_optimization_order
-        self._njobs = n_jobs
+        self._db_name = db_name
 
     def _train_with_params(self, params: dict = {}) -> (float, float):
         optuna.logging.set_verbosity(optuna.logging.FATAL)
@@ -90,19 +91,22 @@ class Sequential_Optimizer:
                 pass
 
             if group == 1:
-                params['subsample'] = trial.suggest_float('subsample', 0.02, 1)
-                params['colsample_bytree'] = trial.suggest_float('colsample_bytree', 0.2, 0.9)
+                params['subsample'] = trial.suggest_float('subsample', 0.4, 1)
+                params['colsample_bytree'] = trial.suggest_float('colsample_bytree', 0.4, 1)
 
             if group == 2:
-                params['max_depth'] = trial.suggest_int('max_depth', 1, 100)
-                params['min_child_weight'] = trial.suggest_float('min_child_weight', 0.01, 10)
+                params['max_depth'] = trial.suggest_int('max_depth', 1, 12)
+                params['min_child_weight'] = trial.suggest_float('min_child_weight', 0.01, 5)
 
             if group == 3:
                 params['learning_rate'] = trial.suggest_float('learning_rate', 0.01, 0.3)
-                params['n_estimators'] = trial.suggest_int('n_estimators', 50, 300)
+                if params['learning_rate'] < 0.05:
+                    params['n_estimators'] = trial.suggest_int('n_estimators', 500, 2000)
+                else:
+                    params['n_estimators'] = trial.suggest_int('n_estimators', 50, 500)
 
             if group == 4:
-                params['reg_alpha'] = trial.suggest_float('reg_alpha', 0.0, 5.0)
+                params['reg_alpha'] = trial.suggest_float('reg_alpha', 0.001, 5.0, log=True)
                 params['reg_lambda'] = trial.suggest_float('reg_lambda', 0.1, 10.0, log=True)
 
         if self._model_type == "lightgbm":
@@ -119,12 +123,12 @@ class Sequential_Optimizer:
                 params['feature_fraction'] = trial.suggest_float('feature_fraction', 0.01, 1)
 
             if group == 3:
-                params['lambda_l1'] = trial.suggest_float('lambda_l1', 0, 10)
+                params['lambda_l1'] = trial.suggest_float('lambda_l1', 0.001, 10, log=True)
                 params['lambda_l2'] = trial.suggest_float('lambda_l2', 0.001, 10, log=True)
 
             if group == 4:
                 params["learning_rate"] = trial.suggest_float('learning_rate', 0.01, 0.3)
-                params['max_bin'] = trial.suggest_int('max_bin', 4, 300)
+                params['max_bin'] = trial.suggest_int('max_bin', 10, 100)
 
             if group == 5:
                 params["n_estimators"] = trial.suggest_int('n_estimators', 50, 300)
@@ -135,27 +139,28 @@ class Sequential_Optimizer:
                 pass
             if group == 1:
                 params['kernel'] = trial.suggest_categorical('kernel', ['linear', 'poly', 'rbf', 'sigmoid'])
-                params['degree'] = trial.suggest_int('degree', 2, 6)
+                if params['kernel'] == 'poly':
+                    params['degree'] = trial.suggest_int('degree', 2, 7)
             if group == 2:
                 params['C'] = trial.suggest_float('C', 0.01, 1000, log=True)
-                params['gamma'] = trial.suggest_categorical('gamma', ['scale', 'auto'])
+                if params['kernel'] not in ['poly', 'rbf', 'sigmoid']:
+                    params['gamma'] = trial.suggest_categorical('gamma', ['scale', 'auto'])
             if group == 3:
                 params['epsilon'] = trial.suggest_float('epsilon', 0.01, 1, log=True)
                 params['shrinking'] = trial.suggest_categorical('shrinking', [True, False])
 
 
         if self._model_type == "rf":
-
             if group == 0:
                 pass
             if group == 1:
-                params['n_estimators'] = trial.suggest_int('n_estimators', 50, 300)
+                params['n_estimators'] = trial.suggest_int('n_estimators', 100, 300)
                 params['min_samples_split'] = trial.suggest_int('min_samples_split', 2, 30)
             if group == 2:
                 params['min_samples_leaf'] = trial.suggest_int('min_samples_leaf', 1, 15)
-                params['min_weight_fraction_leaf'] = trial.suggest_float('min_weight_fraction_leaf', 0.0, 0.9)
+                params['min_weight_fraction_leaf'] = trial.suggest_float('min_weight_fraction_leaf', 0.0, 0.3)
             if group == 3:
-                params['min_impurity_decrease'] = trial.suggest_float('min_impurity_decrease', 0.0, 1.0)
+                params['min_impurity_decrease'] = trial.suggest_float('min_impurity_decrease', 0.0, 0.2)
 
         if self._model_type == "adaboost":
             if group == 0:
@@ -169,49 +174,58 @@ class Sequential_Optimizer:
             if group == 0:
                 pass
             if group == 1:
-                params['alpha'] = trial.suggest_int('alpha', 1, 1000000)
-                # params['solver'] = trial.suggest_categorical('solver',
-                #                                              ["auto", "svd", "cholesky", "lsqr", "sparse_cg", "sag",
-                #                                               "saga", "lbfgs"])
+                params['alpha'] = trial.suggest_float('alpha', 1, 1000000, log=True)
+                params['solver'] = trial.suggest_categorical('solver', ["auto", "svd", "cholesky", "lsqr", "sparse_cg", "sag", "saga"])
             if group == 2:
-                params['max_iter'] = trial.suggest_int('max_iter', 100, 50000)
-                params['tol'] = trial.suggest_float('tol', 0.000001, 0.01)
+                params['max_iter'] = trial.suggest_int('max_iter', 100, 25000)
+                params['tol'] = trial.suggest_float('tol', 0.000001, 0.01, log=True)
 
         if self._model_type == "lasso":
             if group == 0:
                 pass
             if group == 1:
-                params['alpha'] = trial.suggest_int('alpha', 1, 1000000)
+                params['alpha'] = trial.suggest_float('alpha', 1, 1000000, log=True)
                 params['selection'] = trial.suggest_categorical('selection', ["cyclic", "random"])
 
 
             if group == 2:
-                params['tol'] = trial.suggest_float('tol', 0.000001, 0.01)
-                params['max_iter'] = trial.suggest_int('max_iter', 100, 50000)
-
+                params['tol'] = trial.suggest_float('tol', 0.000001, 0.01, log=True)
+                params['max_iter'] = trial.suggest_int('max_iter', 100, 25000)
+                
+        if self._model_type == "linear":
+            if group == 0:
+                pass
 
         results = self._train_with_params(params)
-        r2 = round(float(results[0]), 4)
-        rmse = round(float(results[1]), 4)
+
+        ndcg = round(float(results[0]), 4)
+        spearman = round(float(results[1]), 4)
+        pearson = round(float(results[2]), 4)
+        r2 = round(float(results[3]), 4)
+        mse = round(float(results[4]), 4)
+        
+        trial.set_user_attr("ndcg", ndcg)
+        trial.set_user_attr("spearman", spearman)
+        trial.set_user_attr("pearson", pearson)
+        trial.set_user_attr("r2", r2)
+        trial.set_user_attr("mse", mse)
 
         gc.collect()
-        return r2, rmse
+        return spearman
 
-    def _execute_optimization(self, study_name, group, n_trials, params=dict(), n_jobs: int = -1):
-        timestamp = datetime.now().strftime("%Y_%m_%d-%H_%M_%S")
-        study = optuna.create_study(study_name=study_name, directions=self._direction, storage=f"sqlite:///optuna_study-{timestamp}.db")
-        study.optimize(lambda trial: self._objective(trial, group, params), n_trials=n_trials, n_jobs=n_jobs,
-                       show_progress_bar=True)
-        studys_best_trial = sorted(study.best_trials, key=lambda t: t.values[0])[0]
+    def _execute_optimization(self, study_name, group, n_trials, params=dict()):
+        study = optuna.create_study(study_name=study_name, directions=self._direction, storage=f"sqlite:///optuna_study-{self._db_name}.db")
+        study.optimize(lambda trial: self._objective(trial, group, params), n_trials=n_trials, show_progress_bar=False)
+        studys_best_trial = sorted(study.best_trials, key=lambda t: t.values[0])[0] #ranking by Spearman Coefficient
 
         if group == 0:
-            print("EVALUATION METRIC: ", "R2/RMSE")
-            print(f"Default SCORE: {studys_best_trial.values}")
+            print("EVALUATION METRIC: ", "Spearman, (NDCG/Spearman/Pearson/R2/MSE)")
+            print(f"Default SCORE:, {studys_best_trial.value}, ({studys_best_trial.user_attrs['ndcg'], studys_best_trial.user_attrs['spearman'], studys_best_trial.user_attrs['pearson'], studys_best_trial.user_attrs['r2'], studys_best_trial.user_attrs['mse']})")
 
         else:
             print("STUDY NAME: ", study_name)
-            print("EVALUATION METRIC: ", "R2/RMSE")
-            print(f"BEST SCORE:, {studys_best_trial.values}")
+            print("EVALUATION METRIC: ", "Spearman, (NDCG/Spearman/Pearson/R2/MSE)")
+            print(f"BEST SCORE:, {studys_best_trial.value}, ({studys_best_trial.user_attrs['ndcg'], studys_best_trial.user_attrs['spearman'], studys_best_trial.user_attrs['pearson'], studys_best_trial.user_attrs['r2'], studys_best_trial.user_attrs['mse']})")
             print(f"OPTIMAL PARAMS FOR GROUP{group}: ", studys_best_trial.params)
             print("BEST TRIAL:", studys_best_trial.number)
             print('------------------------------------------------')
@@ -233,6 +247,8 @@ class Sequential_Optimizer:
                     "lightgbm": 5,
                     "rf": 3,
                     "adaboost": 2,
+                    "svr": 3,
+                    "linear": 0,
                     "ridge": 2,
                     "lasso": 2}
 
@@ -244,7 +260,7 @@ class Sequential_Optimizer:
             if i == 0:
                 print(f"=========================== Default Configuration ============================")
                 initial_trial = self._execute_optimization("MLDE-Model", group=group, n_trials=1,
-                                                           params=self._initial_params, n_jobs=1)
+                                                           params=self._initial_params)
                 final_best_trial = initial_trial
                 identified_params = self._initial_params
                 print()
@@ -252,8 +268,7 @@ class Sequential_Optimizer:
             else:
                 print(f"============================ Optimizing Group - {group} ============================")
                 study_result = self._execute_optimization(study_name=f"MLDE-Model_Parameter-Group {group}", group=group,
-                                                          n_trials=self._n_trials, params=copy(identified_params),
-                                                          n_jobs=self._njobs)
+                                                          n_trials=self._n_trials, params=copy(identified_params))
 
                 if final_best_trial.values[0] < study_result.values[0]:
                     final_best_trial = study_result

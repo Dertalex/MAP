@@ -1,0 +1,10 @@
+MLDE-Benchmark Performance Data 03_Training_Performances for D7PM05_blosum80_svr_nGain50_nStart1000_rStart40_nCycles60_normedScores_Norm_score_TH1 - 28-06-2025_11-23
+(0.602, 0.622, np.float64(-0.036), 0.087)
+(0.587, 0.732, np.float64(-0.041), 0.226)
+(0.636, 0.734, np.float64(-0.001), 0.365)
+(0.639, 0.878, np.float64(0.77), 0.101)
+(0.711, 0.741, np.float64(-0.146), 0.617)
+(0.708, 0.906, np.float64(0.819), 0.11)
+(0.715, 0.927, np.float64(0.857), 0.095)
+(0.744, 0.926, np.float64(0.857), 0.107)
+(0.773, 0.937, np.float64(0.876), 0.106)

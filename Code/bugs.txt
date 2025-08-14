@@ -1,0 +1,16 @@
+to fix: 
+-FIXED ddG_top_start0.09999999999999998
+-FIXED logging statt printing
+
+-FIXED logs: contain ArrayID etc.
+
+-FIXED ridge: if solver == "lbfgs: params[positive] = true
+-FIXED lightgbm: feval parameter -> train()
+
+-FIXED RASK ValueError: invalid literal for int() with base 10:
+	
+	
+
+-FIXED RASK_blosum90_ridge: ValueError: The truth value of an array with more than one element is ambiguous. Use a.any() or a.all()
+	
+

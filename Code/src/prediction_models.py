@@ -13,16 +13,33 @@ from lightgbm import early_stopping
 from sklearn import svm
 from sklearn.ensemble import RandomForestRegressor, AdaBoostRegressor
 from sklearn.linear_model import LinearRegression, Ridge, Lasso
-from sklearn.metrics import root_mean_squared_error, r2_score
+from src.metrics import *
 from sklearn.model_selection import KFold
 from sklearn.svm import SVR
 from xgboost import XGBRegressor, XGBRFRegressor
 
 
-class NeuralNetwork(nn.Module):
-    def __init__(self, input_dim, hidden_dim, n_hidden_dims):
-        super(NeuralNetwork, self).__init__()
+class GNNModel(nn.Module, hidden_channels=64, learning_rate=0.001):
+    
+    _learning_rate = 0.001
 
+    def __init__(self, in_channels, hidden_channels=64):
+        super().__init__()
+        self.conv1 = GCNConv(in_channels, hidden_channels)
+        self.conv2 = GCNConv(hidden_channels, hidden_channels)
+        self.lin = nn.Linear(hidden_channels, 1)
+
+    def forward(self, x, edge_index, batch):
+        x = self.conv1(x, edge_index)
+        x = F.relu(x)
+        x = self.conv2(x, edge_index)
+        x = F.relu(x)
+        x = global_mean_pool(x, batch)
+        return self.lin(x)
+
+def train_gnn():
+    dataset = []
+    pass
 
 class ActivityPredictor:
     _is_hypertuned = False
@@ -83,10 +100,11 @@ class ActivityPredictor:
         elif self._model_type == "adaboost":
             self._model = AdaBoostRegressor(**self._params)
         elif self._model_type == "lightgbm":
-            self._model = lgb.LGBMRegressor(**self._params)
+            self._model = lgb.LGBMRegressor(**self._params, n_jobs=-1)
         elif self._model_type == "xgboost":
-            self._model = XGBRegressor(**self._params, early_stopping_rounds=self._early_stopping) \
-                if self._early_stopping else XGBRegressor(**self._params)
+            if self._early_stopping:
+                self._params["early_stopping_rounds"] = self._early_stopping
+            self._model = XGBRegressor(**self._params, feval=spearman_xgboost, maximize=True, n_jobs=-1)
         elif self._model_type == "xgboost_rf":
             self._model = XGBRFRegressor(**self._params)
         elif self._model_type == "linear":
@@ -95,6 +113,8 @@ class ActivityPredictor:
             self._model = Ridge(**self._params)
         elif self._model_type == "lasso":
             self._model = Lasso(**self._params)
+        elif self._model_type == "gnn":
+            self._model = GNNModel(**self._params)
 
     def train(self, k_folds: Optional[int] = 0):
         if self._model_type in ["svr", "rf", "adaboost", "lightgbm", "xgboost", "xgboost_rf", "linear", "ridge",
@@ -114,17 +134,16 @@ class ActivityPredictor:
             # converting the datasets in torch.Tensor-Format to numpy arrays
             # flatten the tensors either by view (pytorch-tensor) or reshape (numpy.ndarrays)
 
-            if isinstance(x_train[0], torch.Tensor):
-                x_train = [tensor.to(dtype=torch.float32).detach().cpu().numpy() for tensor in x_train]
-                x_val = [tensor.to(dtype=torch.float32).detach().cpu().numpy() for tensor in x_val]
-                x_test = [tensor.to(dtype=torch.float32).detach().cpu().numpy() for tensor in x_test]
+            if self._model_type in ["svr", "rf", "adaboost", "lightgbm", "xgboost", "xgboost_rf", "linear", "ridge", "lasso"]:
+                if isinstance(x_train[0], torch.Tensor):
+                    x_train = [tensor.to(dtype=torch.float32).detach().cpu().numpy() for tensor in x_train]
+                    x_val = [tensor.to(dtype=torch.float32).detach().cpu().numpy() for tensor in x_val]
+                    x_test = [tensor.to(dtype=torch.float32).detach().cpu().numpy() for tensor in x_test]
 
-            if len(x_train[0].shape) >= 2:
-                x_train = [x.reshape(-1) for x in x_train]
-                x_val = [x.reshape(-1) for x in x_val]
-                x_test = [x.reshape(-1) for x in x_test]
-
-                """Tbd: other tensor input data types"""
+                if len(x_train[0].shape) >= 2:
+                    x_train = [x.reshape(-1) for x in x_train]
+                    x_val = [x.reshape(-1) for x in x_val]
+                    x_test = [x.reshape(-1) for x in x_test]
 
             # create k-fold splits of dataset
             if not k_folds == "loo" and not isinstance(k_folds, int):
@@ -161,11 +180,11 @@ class ActivityPredictor:
 
                     elif self._model_type == "lightgbm" and self._early_stopping:
                         self._model.fit(x_train_fold, y_train_fold, eval_set=[(x_test_fold, y_test_fold)],
-                                        eval_metric="rmse",
+                                        eval_metric=spearman_lightgbm,
                                         callbacks=[lgb.early_stopping(stopping_rounds=self._early_stopping)])
 
                     else:
-                        with parallel_backend("threading", n_jobs=5):
+                        with parallel_backend("threading", n_jobs=-1):
                             self._model.fit(x_train_fold, y_train_fold)
 
                     model_ensemble.append(self._model)
@@ -187,10 +206,10 @@ class ActivityPredictor:
                     if self._model_type == "xgboost":
                         self._model.fit(x_train, y_train, eval_set=[(x_val, y_val)])
                     elif self._model_type == "lightgbm":
-                        self._model.fit(x_train, y_train, eval_set=[(x_val, y_val)], eval_metric="l1",
+                        self._model.fit(x_train, y_train, eval_set=[(x_val, y_val)], eval_metric=spearman_lightgbm,
                                         callbacks=[lgb.early_stopping(stopping_rounds=self._early_stopping)])
                     else:
-                        with parallel_backend("threading", n_jobs=5):
+                        with parallel_backend("threading", n_jobs=-1):
                             warnings.warn(
                                 "Early Stopping (es) is only supported for xgboost and lightgbm. "
                                 "Scikit-RF already applies validation during training and therefore not requires es. "
@@ -198,16 +217,16 @@ class ActivityPredictor:
                             self._model.fit(x_train, y_train)
 
                 else:  # those models are sped up by providing "njobs" in the params:
-                    if self._model_type in ["xgboost", "lightgbm"]:
+                    if self._model_type == "xgboost":
                         self._model.fit(x_train, y_train)
+                    elif self._model_type == "lightgbm":
+                        self._model.fit(x_train, y_train, feval=spearman_lightgbm)
                     else:
-                        with parallel_backend("threading", n_jobs=5):
+                        with parallel_backend("threading", n_jobs=-1):
                             self._model.fit(x_train, y_train)
 
         self._is_trained = True
         self._performance = self.score(x_val, y_val)
-
-        # print(f"R2: {self._performance[0]}, RMSE: {self._performance[1]}")
 
     def predict(self, x_pred: list, average_fold_results=True) -> list:
         if not self._is_trained:
@@ -262,18 +281,27 @@ class ActivityPredictor:
         if not self._is_trained:
             raise ValueError("Model has not been trained yet. Train it with the train() method")
 
-        r_score = []
-        rmse = []
+        ndcg = []
+        spearman = []
+        pearson = []
+        r_squared = []
+        meansquarederror = []
 
         y_pred = self.predict(x_val)
 
-        r_score.append(r2_score(y_val, y_pred))
-        rmse.append(root_mean_squared_error(y_val, y_pred))
+        ndcg.append(ndcg_score(y_val, y_pred))
+        pearson.append(pearson_correlation(y_pred, y_val))
+        spearman.append(spearman_correlation(y_pred, y_val))
+        r_squared.append(r2_score(y_pred, y_val))
+        meansquarederror.append(mse(y_pred, y_val))
 
-        r_score = np.mean(np.stack(r_score), axis=0)
-        rmse = np.mean(np.stack(rmse), axis=0)
+        ndcg = np.mean(np.stack(ndcg), axis=0)
+        pearson = np.mean(np.stack(pearson), axis=0)
+        spearman = np.mean(np.stack(spearman), axis=0)
+        r_squared = np.mean(np.stack(r_squared), axis=0)
+        meansquarederror = np.mean(np.stack(meansquarederror), axis=0)
 
-        return r_score, rmse
+        return ndcg, spearman, pearson, r_squared, meansquarederror
 
     def get_performance(self):
         return self._performance

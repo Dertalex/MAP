@@ -1,0 +1,4 @@
+MLDE-Benchmark Performance Data 03_Training_Performances for D7PM05_blosum80_xgboost_nGain50_nStart1000_rStart90_nCycles60_normedScores_Norm_score_1_run1 - 2025-07-15_18-42
+(np.float64(0.992), 0.906, 0.963, np.float64(0.895), 0.011)
+(np.float64(0.994), 0.928, 0.975, np.float64(0.932), 0.007)
+(np.float64(0.995), 0.928, 0.976, np.float64(0.917), 0.009)

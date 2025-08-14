@@ -1,0 +1,10 @@
+MLDE-Benchmark Performance Data 04_Validation_Performances for D7PM05_blosum80_svr_nGain50_nStart1000_rStart40_nCycles60_normedScores_Norm_score_TH1 - 28-06-2025_11-23
+(np.float64(0.452), np.float64(0.408), np.float64(-0.032), np.float64(0.086))
+(np.float64(0.621), np.float64(0.656), np.float64(-0.058), np.float64(0.237))
+(np.float64(0.637), np.float64(0.775), np.float64(-0.066), np.float64(0.498))
+(np.float64(0.636), np.float64(0.776), np.float64(0.572), np.float64(0.176))
+(np.float64(0.705), np.float64(0.662), np.float64(-0.285), np.float64(0.961))
+(np.float64(0.666), np.float64(0.777), np.float64(0.482), np.float64(0.318))
+(np.float64(0.684), np.float64(0.748), np.float64(0.422), np.float64(0.43))
+(np.float64(0.7), np.float64(0.746), np.float64(0.463), np.float64(0.458))
+(np.float64(0.723), np.float64(0.745), np.float64(0.315), np.float64(0.477))
