@@ -51,8 +51,12 @@ class Sequential_Optimizer:
     def __init__(self,
                  model_type: Literal[
                      "rf", "xgboost", "gxboost_rf", "lightgbm", "linear", "svr", "adaboost", "ridge", "lasso", "elastic_net", "fnn"],
-                 cv_folds, x_arr: list, y_arr: list, initial_params, trials_per_group: int,
-                 db_name: str, early_stopping: float = False, reverse_optimization_order: bool = False):
+                 cv_folds, x_arr: list, y_arr: list, 
+                 initial_params, 
+                 trials_per_group: int,
+                 db_name: str, 
+                 early_stopping: float = False, 
+                 reverse_optimization_order: bool = False):
 
         self._model_type = model_type
         self._initial_params = initial_params
@@ -137,19 +141,45 @@ class Sequential_Optimizer:
             if group == 1:
                 params['kernel'] = trial.suggest_categorical('kernel', ['linear', 'poly', 'rbf', 'sigmoid'])
                 if params['kernel'] == 'poly':
-                    params['degree'] = trial.suggest_int('degree', 2, 7)
-            if group == 2:
+                    params['degree'] = trial.suggest_int('degree', 2, 7) # will be ignored, if kernel not poly
+
+                params['epsilon'] = trial.suggest_float('epsilon', 0.01, 1, log=True)
+                params['shrinking'] = trial.suggest_categorical('shrinking', [True, False])
                 params['C'] = trial.suggest_float('C', 0.01, 1000, log=True)
                 try:
                     if params['kernel'] in ['poly', 'rbf', 'sigmoid']:
                         params['gamma'] = trial.suggest_categorical('gamma', ['scale', 'auto'])
                 except KeyError: 
-                    pass
-            
-            if group == 3:
+                    pass            
+
+            if group == 2:
+                params['kernel'] = trial.suggest_categorical('kernel', ['linear', 'poly', 'rbf', 'sigmoid'])
+                if params['kernel'] == 'poly':
+                    params['degree'] = trial.suggest_int('degree', 2, 7) # will be ignored, if kernel not poly
+
                 params['epsilon'] = trial.suggest_float('epsilon', 0.01, 1, log=True)
                 params['shrinking'] = trial.suggest_categorical('shrinking', [True, False])
+                params['C'] = trial.suggest_float('C', 0.01, 1000, log=True)
+                try:
+                    if params['kernel'] in ['poly', 'rbf', 'sigmoid']:
+                        params['gamma'] = trial.suggest_categorical('gamma', ['scale', 'auto'])
+                except KeyError: 
+                    pass            
 
+            if group == 3:
+                params['kernel'] = trial.suggest_categorical('kernel', ['linear', 'poly', 'rbf', 'sigmoid'])
+                if params['kernel'] == 'poly':
+                    params['degree'] = trial.suggest_int('degree', 2, 7) # will be ignored, if kernel not poly
+
+                params['epsilon'] = trial.suggest_float('epsilon', 0.01, 1, log=True)
+                params['shrinking'] = trial.suggest_categorical('shrinking', [True, False])
+                params['C'] = trial.suggest_float('C', 0.01, 1000, log=True)
+                try:
+                    if params['kernel'] in ['poly', 'rbf', 'sigmoid']:
+                        params['gamma'] = trial.suggest_categorical('gamma', ['scale', 'auto'])
+                except KeyError: 
+                    pass                            
+                
         if self._model_type == "rf":
             if group == 0:
                 pass
@@ -165,7 +195,6 @@ class Sequential_Optimizer:
                 pass
             if group == 1:
                 params['n_estimators'] = trial.suggest_int('n_estimators', 50, 1000)
-            if group == 2:
                 params['learning_rate'] = trial.suggest_float('learning_rate', 0.01, 10)
 
         if self._model_type == "ridge":
@@ -178,11 +207,25 @@ class Sequential_Optimizer:
                                                               "saga"])
                 params['tol'] = 0.0001
                 params['max_iter'] = 10000
+            
+            if group == 2:
+                params['alpha'] = trial.suggest_float('alpha', 0.0001, 1000, log=True)
+                params['solver'] = trial.suggest_categorical('solver',
+                                                             ["auto", "svd", "cholesky", "lsqr", "sparse_cg", "sag",
+                                                              "saga"])
+                params['tol'] = 0.0001
+                params['max_iter'] = 10000
 
         if self._model_type == "lasso":
             if group == 0:
                 pass
             if group == 1:
+                params['alpha'] = trial.suggest_float('alpha', 0.0001, 1000, log=True)
+                params['selection'] = trial.suggest_categorical('selection', ["cyclic", "random"])
+                params['tol'] = 0.0001
+                params['max_iter'] = 10000
+
+            if group == 2:
                 params['alpha'] = trial.suggest_float('alpha', 0.0001, 1000, log=True)
                 params['selection'] = trial.suggest_categorical('selection', ["cyclic", "random"])
                 params['tol'] = 0.0001
@@ -200,6 +243,13 @@ class Sequential_Optimizer:
                 params['l1_ratio'] = trial.suggest_float('l1_ratio', 0.0, 1.0)
                 params['tol'] = 0.0001
                 params['max_iter'] = 15000
+                
+            if group == 2:
+                params['alpha'] = trial.suggest_float('alpha', 0.0001, 1000, log=True)
+                params['l1_ratio'] = trial.suggest_float('l1_ratio', 0.0, 1.0)
+                params['tol'] = 0.0001
+                params['max_iter'] = 15000
+                
 
         if self._model_type == "fnn":
             if group == 0:
@@ -208,8 +258,16 @@ class Sequential_Optimizer:
                 params['n_layers'] = trial.suggest_int("n_hidden_layers", 0, 5)
                 params['n_units'] = trial.suggest_categorical("n_units", [128, 256, 512, 1024, 2048])
                 params['lr'] = trial.suggest_float("lr", 1e-5, 1e-2, log=True)
-            if group == 2:  # regularization
                 params['dropout'] = trial.suggest_float("dropout", 0.0, 0.5)
+                
+            if group == 2:  # everything again...
+                params['n_layers'] = trial.suggest_int("n_hidden_layers", 0, 5)
+                params['n_units'] = trial.suggest_categorical("n_units", [128, 256, 512, 1024, 2048])
+                params['lr'] = trial.suggest_float("lr", 1e-5, 1e-2, log=True)
+                params['dropout'] = trial.suggest_float("dropout", 0.0, 0.5)
+        
+        print(f"Applied Hyperparams: {params}")
+                
         results = self._train_with_params(params)
 
         ndcg = round(float(results[0]), 4)
@@ -227,10 +285,9 @@ class Sequential_Optimizer:
         gc.collect()
         return spearman
 
-    def _execute_optimization(self, study_name, group, n_trials, params=dict()):
+    def _execute_optimization(self, study_name, group, n_trials, params : dict = {}):
         study = optuna.create_study(study_name=study_name,
                                     directions=self._direction,
-                                    # pruner=optuna.pruners.SuccessiveHalvingPruner(), 
                                     storage=None
                                     )
                                     
@@ -243,14 +300,17 @@ class Sequential_Optimizer:
                 f"Default SCORE:, {study.trials[0].value}, ({study.trials[0].user_attrs['ndcg'], study.trials[0].user_attrs['spearman'], study.trials[0].user_attrs['pearson'], study.trials[0].user_attrs['r2'], study.trials[0].user_attrs['mse']})")
 
         else:
-#            total_rest = 0
-#           while len(study.trials) == 0 and total_rest <= 400:
-#              rest = 5 #seconds
-#             time.sleep(rest)
-#            total_rest = total_rest + rest
-#       if total_rest >= 199 and len(study.trials)==0:
-#          raise ValueError("Study.trials and study.best_trial are not available.") 
-
+            time.sleep(2)
+            
+            completed_trials = list(t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE)
+            failed_trials = list(t for t in study.trials if t.state == optuna.trial.TrialState.FAIL)
+            
+            if len(completed_trials) ==0:
+                return study.trials[0]    
+            
+        
+            print(f'n completed trials: {len(completed_trials)}')
+            print(f'n failed trials: {len(failed_trials)}')
             print("STUDY NAME: ", study_name)
             print("EVALUATION METRIC: ", "Spearman, (NDCG/Spearman/Pearson/R2/MSE)")
             print(
@@ -258,9 +318,7 @@ class Sequential_Optimizer:
             print(f"OPTIMAL PARAMS FOR GROUP{group}: ", study.best_trial.params)
             print("BEST TRIAL:", study.best_trial.number)
             print('------------------------------------------------')
-
-
-
+                
         return study.best_trial if group != 0 else study.trials[0]
 
     def optimize_stepwise(self, show_progress: bool = True, show_prints=False):
@@ -286,9 +344,9 @@ class Sequential_Optimizer:
                     "adaboost": 2,
                     "svr": 3,
                     "linear": 0,
-                    "ridge": 1,
-                    "lasso": 1,
-                    "elastic_net": 1,
+                    "ridge": 2,
+                    "lasso": 2,
+                    "elastic_net": 2,
                     "fnn": 2}
 
         identified_params = dict()
@@ -310,15 +368,21 @@ class Sequential_Optimizer:
                                                           n_trials=self._n_trials, params=copy(identified_params))
 
                 before = copy(final_best_trial.value) if final_best_trial.value is not None else -1e3
-                if before < study_result.value: #assuming maximization of score (i.e. no (R)MSE)
-                    final_best_trial = study_result
-                    best_group = group
-                    identified_params.update(study_result.params)
-                    print(f"SCORE IMPROVED! IDEAL PARAMS UPDATED AS FOLLOWED: ,\n"
-                          f"{identified_params}")
-                else:
-                    print(f"SCORE DID NOT IMPROVE! PARAMETERS FROM LAST STUDY HAVE BEEN MAINTAINED")
-                    print()
+                try:
+                    if before < study_result.value: #assuming maximization of score (i.e. no (R)MSE)
+                        final_best_trial = study_result
+                        best_group = group
+                        identified_params.update(study_result.params)
+                        print(f"SCORE IMPROVED! IDEAL PARAMS UPDATED AS FOLLOWED:\n"
+                            f"{identified_params}")
+                
+                    else:
+                        print(f"SCORE DID NOT IMPROVE! PARAMETERS FROM LAST STUDY HAVE BEEN MAINTAINED\n")
+                        
+                except TypeError:
+                    print(f"OPTIMIZATION FOR GROUP {group} FAILED COMPLETELY. PARAMETERS FROM LAST STUDY HAVE BEEN MAINTAINED.\n")
+                    
+
 
         print("=========================== FINAL OPTIMAL PARAMETERS ============================")
         print(f'Best Study: {best_group}')

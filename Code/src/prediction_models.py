@@ -1,76 +1,191 @@
 import gc
 import os.path
-import random
 import warnings
+import random
 from datetime import datetime
-from typing import Literal, Optional, List
+from typing import Literal, Optional, List, Tuple
 from joblib import parallel_backend
-import lightgbm as lgb
 import numpy as np
-import torch
-import torch
-import torch.nn.functional as F
-import torch.nn as nn
-from torch_geometric.data import Dataset, InMemoryDataset
-from torch_geometric.loader import DataLoader
-from torch_geometric.nn import GCNConv, global_mean_pool
+import copy
 
-from lightgbm import early_stopping
+from src.utils import HiddenPrints, HiddenWarnings, proper_time, make_folds
+from src.metrics import *
 from sklearn import svm
 from sklearn.ensemble import RandomForestRegressor, AdaBoostRegressor
-from sklearn.linear_model import LinearRegression, Ridge, Lasso
-from src.metrics import *
+from sklearn.linear_model import LinearRegression, Ridge, Lasso, ElasticNet
 from sklearn.model_selection import KFold
 from sklearn.svm import SVR
+from torch.nn import MarginRankingLoss
+
 from xgboost import XGBRegressor, XGBRFRegressor
+import lightgbm as lgb
+from lightgbm import early_stopping
+
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, TensorDataset
 
 
-class GNNModel(nn.Module, hidden_channels=64, learning_rate=0.001):
-    
-    _learning_rate = 0.001
+class FeedForwardNet(nn.Module):
+    default_params = dict(
+        input_dim=None,  # must be provided!
+        hidden_dim=1000,  # default hidden size
+        n_hidden_layers=4,
+        dropout=0.3,
+        max_epochs=200,
+        learning_rate=0.001,
+        batch_size=32,
+        early_stopping=10,
+        weight_decay=0.0,
+        device="auto",
+        criterion="MSE"
+    )
 
-    def __init__(self, in_channels, hidden_channels=64):
-        super().__init__()
-        self.conv1 = GCNConv(in_channels, hidden_channels)
-        self.conv2 = GCNConv(hidden_channels, hidden_channels)
-        self.lin = nn.Linear(hidden_channels, 1)
+    def __init__(self, **kwargs):
+        super(FeedForwardNet, self).__init__()
+        # Merge defaults with user params
+        params = {**self.default_params, **kwargs}
 
-    def forward(self, x, edge_index, batch):
-        x = self.conv1(x, edge_index)
-        x = F.relu(x)
-        x = self.conv2(x, edge_index)
-        x = F.relu(x)
-        x = global_mean_pool(x, batch)
-        return self.lin(x)
+        self._max_epochs = params["max_epochs"]
+        self._learning_rate = params["learning_rate"]
+        self._batch_size = params["batch_size"]
+        self._early_stopping = params["early_stopping"]
+        self._criterion = params["criterion"]
+        if self._criterion == "Ranking" and self._batch_size % 2 != 0:
+            self._batch_size = self._batch_size + 1
+        if params["device"] != "auto":
+            self._device = params["device"]
+        else:
+            self._device = "cuda" if torch.cuda.is_available() else "cpu"
 
-def train_gnn(dataset: List[Dataset], split=(80, 20), batch_size=32, n_epochs=100, lr=0.001, loss_fn = nn.MarginRankingLoss(margin=1.0)):
+        self._input_dim = params["input_dim"]
+        self._hidden_dim = params["hidden_dim"]
+        self._n_hidden_layers = params["n_hidden_layers"]
+        self._dropout = params["dropout"]
+        self._weight_decay = params["weight_decay"]
+        # Build network dynamically
+        layers = []
+        in_features = self._input_dim
+        for i in range(self._n_hidden_layers):
+            out_features = self._hidden_dim if i == 0 else max(in_features // 2, 4)
+            layers.append(nn.Linear(in_features, out_features))
+            layers.append(nn.ReLU())
+            if self._dropout > 0:
+                layers.append(nn.Dropout(self._dropout))
+            in_features = out_features
+        layers.append(nn.Linear(in_features, 1))
+        self._network = nn.Sequential(*layers)
+        self.to(self._device)
 
-    train_loader = DataLoader(dataset[:split[0]], batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(dataset[split[0]:split[0]+split[1]], batch_size=batch_size, shuffle=True)
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    model = GNNModel(in_channels=dataset.num_features, hidden_channels=64)
-    ranking_loss = loss_fn
+    def _forward(self, x):
+        return self._network(x)
 
-    for epoch in range(n_epochs):
-        model.train()
-        total_train_loss = 0
-        for batch in train_loader:
-            optimizer.zero_grad()
-            output = model(batch.x, batch.edge_index, batch.batch).squeeze()
-            train_loss = ranking_loss(output, batch.y)
-            train_loss.backward()
-            optimizer.step()
-            total_train_loss += train_loss.item()
-        
-        model.eval()
+    def predict(self, x):
         with torch.no_grad():
-            total_val_loss = 0
-            for batch in val_loader:
-                predictions = model(batch.x, batch.edge_index, batch.batch).squeeze()
-                val_loss = ranking_loss(predictions, batch.y)
-                total_val_loss += val_loss.item()
+            model = self.to(self._device)
+            model.eval()
+            x = x.to(self._device)
+            result = model._forward(x)
+            return result
 
-        print(f'Epoch {epoch+1}/{n_epochs}, Train Loss: {total_train_loss:.4f}, Val Loss: {total_val_loss:.4f}')
+    def fit(self, train_set: Tuple[torch.Tensor, torch.Tensor], eval_set: Tuple[torch.Tensor, torch.Tensor],
+            maximize: bool = False):
+        loss_fn = {"MSE": torch.nn.MSELoss(),
+                   "Ranking": torch.nn.MarginRankingLoss()}
+        criterion = loss_fn[self._criterion]
+
+        optimization_directions = {"MSE": False,
+                                   "Ranking": False}
+        maximize = optimization_directions[self._criterion]
+        optimizer = torch.optim.Adam(self.parameters(), lr=self._learning_rate, weight_decay=self._weight_decay)
+
+        train_loader = DataLoader(TensorDataset(train_set[0], train_set[1]), batch_size=int(self._batch_size),
+                                  shuffle=True)
+        val_loader = DataLoader(TensorDataset(eval_set[0], eval_set[1]), batch_size=int(self._batch_size), shuffle=True)
+
+        worsened = 0
+        best_weights = copy.deepcopy(self.state_dict())
+        best_epoch = 0
+        best_val_loss = -999999 if maximize else 999999
+        n_epochs = 0
+
+        while worsened < self._early_stopping:
+            self.train()
+            total_train_loss = 0
+            for x_train, y_train in train_loader:
+                x_train, y_train = x_train.to(self._device), y_train.to(self._device)
+                y_pred = self._forward(x_train)
+                if self._criterion == "MSE":
+                    train_loss = criterion(y_pred, y_train)
+
+                if self._criterion == "Ranking":
+                    y_pred_1 = y_pred[0:y_pred.shape[0]//2].reshape(-1)
+                    y_pred_2 = y_pred[y_pred.shape[0]//2:].reshape(-1)
+                    y_true_1 = y_train[0:y_pred.shape[0]//2].reshape(-1)
+                    y_true_2 = y_train[y_pred.shape[0]//2:].reshape(-1)
+
+                    target = torch.ones_like(y_true_1)
+                    target[y_true_1 < y_true_2] = -1
+                    target[y_true_1 == y_true_2] = 1
+                    train_loss = criterion(y_pred_1, y_pred_2, target)
+
+                optimizer.zero_grad()
+                train_loss.backward()
+                optimizer.step()
+                total_train_loss += train_loss.item()
+            total_train_loss = total_train_loss / len(train_loader)
+
+            # validation
+            with torch.no_grad():
+                self.eval()
+                total_val_loss = 0
+                for x_val, y_val in val_loader:
+                    x_val, y_val = x_val.to(self._device), y_val.to(self._device)
+                    y_pred = self._forward(x_val)
+                    if self._criterion == "MSE":
+                        val_loss = criterion(y_pred, y_val)
+
+                    if self._criterion == "Ranking":
+                        y_pred_1 = y_pred[0:y_pred.shape[0] // 2].reshape(-1)
+                        y_pred_2 = y_pred[y_pred.shape[0] // 2:].reshape(-1)
+                        y_true_1 = y_val[0:y_pred.shape[0] // 2].reshape(-1)
+                        y_true_2 = y_val[y_pred.shape[0] // 2:].reshape(-1)
+
+                        target = torch.ones_like(y_true_1)
+                        target[y_true_1 < y_true_2] = -1
+                        target[y_true_1 == y_true_2] = 1
+                        val_loss = criterion(y_pred_1, y_pred_2, target)
+
+                    total_val_loss += val_loss.item()
+                total_val_loss = total_val_loss / len(val_loader)
+
+                improved = (total_val_loss < best_val_loss) if not maximize else (total_val_loss > best_val_loss)
+
+                if improved:
+                    worsened = 0
+                    best_epoch = n_epochs
+                    best_val_loss = total_val_loss
+                    best_weights = copy.deepcopy(self.state_dict())
+                else:
+                    worsened += 1
+
+            n_epochs += 1
+
+            if self._max_epochs and n_epochs >= self._max_epochs:
+                print("Reached maximum epochs. Stopping training.")
+                break
+
+            print(
+                f"Epoch {n_epochs}, Train Loss: {total_train_loss:.4f}, Val Loss: {total_val_loss:.4f}")
+
+        if not self._max_epochs and worsened >= self._early_stopping:
+            print(f"Early stopping after {self._early_stopping} epochs without improvement.")
+
+        self.load_state_dict(best_weights)
+        self.eval()
+        print("     ------     ")
+        print(f"Final Model State: epoch={best_epoch}, best_val_loss={best_val_loss:.4f}")
+        print("     ======     ")
 
 
 class ActivityPredictor:
@@ -80,19 +195,18 @@ class ActivityPredictor:
     _model = None
     _params = dict()
     _split = (80, 10, 10)
-    _data_prepared = None
     _train_data = None
     _test_data = None
     _val_data = None
     _performance = None
-    _roc_auc_score = None
     _is_trained = False
     _seed = None
-    _data_raw = None
+    _data = None
 
     def __init__(self, model_type: Literal[
-        "svr", "rf", "adaboost", "lightgbm", "xgboost", "xgboost_rf", "linear", "ridge", "lasso"], x_arr, y_arr,
-                 split=(80, 10, 10), params: Optional[dict] = dict, early_stopping: Optional[int] = False,
+        "svr", "rf", "adaboost", "lightgbm", "xgboost", "xgboost_rf", "linear", "ridge", "lasso", "elastic_net", "fnn"],
+                 x_arr, y_arr,
+                 split=(80, 20), params: Optional[dict] = dict, early_stopping: Optional[int] = False,
                  shuffle_data: Optional[bool] = True,
                  seed: Optional[int] = random.seed):
         self._model_type = model_type
@@ -102,211 +216,171 @@ class ActivityPredictor:
         data = [(x, y) for x, y in zip(x_arr, y_arr)]
         if shuffle_data:
             random.shuffle(data)
-        self._define_model()
         self._params = params
-        self._data_raw = self._split_data(data)
+        self._data = self._split_data(data)
 
     def _split_data(self, data):
         train_size = int(len(data) * self._split[0] / sum(self._split))
-        test_size = int(len(data) * self._split[1] / sum(self._split))
 
         train_data = data[:train_size]
-        test_data = data[train_size:train_size + test_size]
-        val_data = data[train_size + test_size:]
+        val_data = data[train_size:]
 
         splitted_data = {"x_train": [embedding[0] for embedding in train_data],
                          "x_val": [embedding[0] for embedding in val_data],
-                         "x_test": [embedding[0] for embedding in test_data],
                          "y_train": [float(label[1]) for label in train_data],
-                         "y_val": [float(label[1]) for label in val_data],
-                         "y_test": [float(label[1]) for label in test_data]
+                         "y_val": [float(label[1]) for label in val_data]
                          }
 
         return splitted_data
 
     def _define_model(self):
         if self._model_type == "svr":
-            self._model = SVR(**self._params)
+            return SVR(**self._params)
         elif self._model_type == "rf":
-            self._model = RandomForestRegressor(**self._params)
+            return RandomForestRegressor(**self._params)
         elif self._model_type == "adaboost":
-            self._model = AdaBoostRegressor(**self._params)
+            return AdaBoostRegressor(**self._params)
         elif self._model_type == "lightgbm":
-            self._model = lgb.LGBMRegressor(**self._params, n_jobs=-1)
+            return lgb.LGBMRegressor(**self._params, n_jobs=-1)
         elif self._model_type == "xgboost":
             if self._early_stopping:
                 self._params["early_stopping_rounds"] = self._early_stopping
-            self._model = XGBRegressor(**self._params, feval=spearman_xgboost, maximize=True, n_jobs=-1)
+            return XGBRegressor(**self._params, feval=spearman_xgboost, maximize=True, n_jobs=-1)
         elif self._model_type == "xgboost_rf":
-            self._model = XGBRFRegressor(**self._params)
+            return XGBRFRegressor(**self._params)
         elif self._model_type == "linear":
-            self._model = LinearRegression(**self._params)
+            return LinearRegression(**self._params)
         elif self._model_type == "ridge":
-            self._model = Ridge(**self._params)
+            return Ridge(**self._params)
         elif self._model_type == "lasso":
-            self._model = Lasso(**self._params)
-        elif self._model_type == "gnn":
-            self._model = GNNModel(**self._params)
+            return Lasso(**self._params)
+        elif self._model_type == "elastic_net":
+            return ElasticNet(**self._params)
+        elif self._model_type == "fnn":
+            self._params["early_stopping"] = self._early_stopping
+            return FeedForwardNet(**self._params)
 
-    def train(self, k_folds: Optional[int] = 0):
+    def train(self, k_folds: Optional[int] = 1):
+
+        torch.cuda.empty_cache()
+        # train the model like a scikit-learn model, prepare data for scikit learn -alike models as flattened lists/np arrays
         if self._model_type in ["svr", "rf", "adaboost", "lightgbm", "xgboost", "xgboost_rf", "linear", "ridge",
-                                "lasso"]:
-            # train the model like a scikit-learn model
-
-            # defining the inputs(x) and their label(y)
-            x_train = self._data_raw["x_train"]
-            x_val = self._data_raw["x_val"]
-            x_test = self._data_raw["x_test"]
-
-            y_train = self._data_raw["y_train"]
-            y_val = self._data_raw["y_val"]
-            y_test = self._data_raw["y_test"]
-
-            # retrieve encoding type from tensor dimension
-            # converting the datasets in torch.Tensor-Format to numpy arrays
-            # flatten the tensors either by view (pytorch-tensor) or reshape (numpy.ndarrays)
-
-            if self._model_type in ["svr", "rf", "adaboost", "lightgbm", "xgboost", "xgboost_rf", "linear", "ridge", "lasso"]:
-                if isinstance(x_train[0], torch.Tensor):
-                    x_train = [tensor.to(dtype=torch.float32).detach().cpu().numpy() for tensor in x_train]
-                    x_val = [tensor.to(dtype=torch.float32).detach().cpu().numpy() for tensor in x_val]
-                    x_test = [tensor.to(dtype=torch.float32).detach().cpu().numpy() for tensor in x_test]
-
-                if len(x_train[0].shape) >= 2:
-                    x_train = [x.reshape(-1) for x in x_train]
-                    x_val = [x.reshape(-1) for x in x_val]
-                    x_test = [x.reshape(-1) for x in x_test]
-
-            # create k-fold splits of dataset
-            if not k_folds == "loo" and not isinstance(k_folds, int):
-                raise ValueError("k_folds must be an integer or 'loo' for leave-one-out cross-validation")
-
-            if k_folds != 0 or k_folds == "loo":
-
-                x_train = np.concatenate([x_train, x_test])
-                y_train = np.concatenate([y_train, y_test])
-
-                self._data_prepared = {"x_train": x_train,
-                                       "x_val": x_val,
-                                       "y_train": y_train,
-                                       "y_val": y_val,
-                                       }
-
-                model_ensemble = []
-
-                if k_folds != "loo":
-                    folds = KFold(n_splits=k_folds, shuffle=False, random_state=self._seed)
+                                "lasso", "elastic_net"]:
+            if isinstance(self._data["x_train"][0], torch.Tensor):
+                for key in ["x_train", "x_val"]:
+                    self._data[key] = [tensor.detach().cpu().numpy() for tensor in self._data[key]]
+            for key in self._data.keys():
+                if len(np.ravel(self._data[key][0])) > 1:
+                    self._data[key] = [np.ravel(x_or_y) for x_or_y in self._data[key]]
                 else:
-                    folds = KFold(n_splits=len(x_train), shuffle=False, random_state=self._seed)
+                    self._data[key] = [x_or_y for x_or_y in self._data[key]]
 
-                for i, x_split in enumerate(folds.split(x_train)):
-                    train_index, test_index = x_split
-                    x_train_fold, x_test_fold = x_train[train_index], x_train[test_index]
-                    y_train_fold, y_test_fold = y_train[train_index], y_train[test_index]
+        # model is a feed-forward neural network, prepare data for pytorch ANN as flattened tensors
+        elif self._model_type in ["fnn"]:
+            if not isinstance(self._data["x_train"][0], torch.Tensor):  # convert data to torch tensors
+                for key in ["x_train", "x_val"]:
+                    self._data[key] = [torch.tensor(x, dtype=torch.float32) for x in self._data[key]]
+                
+            if not isinstance(self._data["y_train"][0], torch.Tensor):  # convert data to torch tensors
+                for key in ["y_train", "y_val"]:
+                    self._data[key] = [torch.tensor(x, dtype=torch.float32) for x in self._data[key]]
+            
+            for key in self._data.keys():  # flatten tensors
+                self._data[key] = [tensor.reshape(-1) for tensor in self._data[key]]
 
-                    # initiate multiple model instances for ensemble learning
+        # create k-fold splits of dataset
+        folds = make_folds(self._data["x_train"], self._data["y_train"], k_folds=k_folds)
+        if k_folds == 1:
+            folds[0][2], folds[0][3] = self._data["x_val"], self._data["y_val"]
 
-                    self._define_model()
-                    if self._model_type == "xgboost" and self._early_stopping:
-                        self._model.fit(x_train_fold, y_train_fold, eval_set=[(x_test_fold, y_test_fold)])
+        model_ensemble = []
 
-                    elif self._model_type == "lightgbm" and self._early_stopping:
-                        self._model.fit(x_train_fold, y_train_fold, eval_set=[(x_test_fold, y_test_fold)],
-                                        eval_metric=spearman_lightgbm,
-                                        callbacks=[lgb.early_stopping(stopping_rounds=self._early_stopping)])
+        for x_train, y_train, x_val, y_val in folds:
+            if self._model_type == "fnn":
+                self._params["input_dim"] = len(x_train[0])  # set input dimension for FNNs
 
-                    else:
-                        with parallel_backend("threading", n_jobs=-1):
-                            self._model.fit(x_train_fold, y_train_fold)
+            model = self._define_model()  # initiate multiple model instances for ensemble learnin
 
-                    model_ensemble.append(self._model)
+            if self._model_type == "xgboost" and self._early_stopping:
+                model.fit(x_train, y_train, eval_set=[(x_val, y_val)])
 
-                self._model = model_ensemble
+            elif self._model_type == "lightgbm" and self._early_stopping:
+                model.fit(
+                    X=x_train,
+                    y=y_train,
+                    eval_set=[(np.array(x_val), np.array(y_val))],
+                    eval_metric=spearman_lightgbm,
+                    callbacks=[lgb.early_stopping(stopping_rounds=self._early_stopping)]
+                )
 
-            else:  # k_folds == 0
-                self._data_prepared = {"x_train": x_train,
-                                       "x_val": x_val,
-                                       "x_test": x_test,
-                                       "y_train": y_train,
-                                       "y_val": y_val,
-                                       "y_test": y_test
-                                       }
+            elif self._early_stopping is not False and self._model_type != "fnn":
+                    warnings.warn(
+                        "Early Stopping is only supported for xgboost and lightgbm. Since the chosen model is not one of those, this parameter will be ignored.")
+                    model.fit(x_train, y_train)
+            else:
+                if self._model_type == "xgboost":
+                    model.fit(x_train, y_train)
+                elif self._model_type == "lightgbm":
+                    model.fit(x_train, y_train, eval_metric=spearman_lightgbm)
+                elif self._model_type == "fnn":
+                    model.fit(train_set=(torch.stack(x_train), torch.stack(y_train)),
+                              eval_set=(torch.stack(x_val), torch.stack(y_val)))
+                else:
+                    with parallel_backend("threading", n_jobs=-1):
+                        model.fit(x_train, y_train)
 
-                self._define_model()
+            model_ensemble.append(model)
 
-                if self._early_stopping is not False:
-                    if self._model_type == "xgboost":
-                        self._model.fit(x_train, y_train, eval_set=[(x_val, y_val)])
-                    elif self._model_type == "lightgbm":
-                        self._model.fit(x_train, y_train, eval_set=[(x_val, y_val)], eval_metric=spearman_lightgbm,
-                                        callbacks=[lgb.early_stopping(stopping_rounds=self._early_stopping)])
-                    else:
-                        with parallel_backend("threading", n_jobs=-1):
-                            warnings.warn(
-                                "Early Stopping (es) is only supported for xgboost and lightgbm. "
-                                "Scikit-RF already applies validation during training and therefore not requires es. "
-                                "Other models are not supported yet and will be trained normally without es.")
-                            self._model.fit(x_train, y_train)
-
-                else:  # those models are sped up by providing "njobs" in the params:
-                    if self._model_type == "xgboost":
-                        self._model.fit(x_train, y_train)
-                    elif self._model_type == "lightgbm":
-                        self._model.fit(x_train, y_train, feval=spearman_lightgbm)
-                    else:
-                        with parallel_backend("threading", n_jobs=-1):
-                            self._model.fit(x_train, y_train)
-
+        self._model = model_ensemble
         self._is_trained = True
-        self._performance = self.score(x_val, y_val)
+        self._performance = self.score(self._data["x_val"], self._data["y_val"])
 
     def predict(self, x_pred: list, average_fold_results=True) -> list:
+        # basic input checks
+
         if not self._is_trained:
             raise ValueError("Model has not been trained yet. Train it with the train() method")
 
+        # prepare input data for prediction - and check whether model type is supported
         if self._model_type in ["svr", "rf", "adaboost", "lightgbm", "xgboost", "xgboost_rf", "linear", "ridge",
-                                "lasso"]:
-            y_pred = []
-            ensemble_results = []
+                                "lasso", "elastic_net"]:
+            if isinstance(x_pred[0], torch.Tensor):
+                x_pred = [tensor.detach().cpu().numpy() for tensor in x_pred]
+            x_pred = [np.ravel(embedding) for embedding in x_pred]
 
-            if isinstance(self._model,
-                          list):  # if self._model is stored as a list, it is because a cross validation approach is used with multiple models)
-                models = self._model
-            else:  # make it a list to iterate over its instances, even its only one model
-                models = [self._model]
-
-            for x in x_pred:
-
-                ensemble_results = []
-                if isinstance(x, torch.Tensor):
-                    x = x.detach().cpu().numpy()
-                if len(x.shape) >= 2:
-                    x = np.ravel(x)
-
-                for model in models:
-                    if self._early_stopping is not False:
-                        if self._model_type == "xgboost":
-                            result = model.predict([x], iteration_range=(0, model.best_iteration + 1))
-                        elif self._model_type == "lightgbm":
-                            result = model.predict([x], num_iteration=model.best_iteration_)
-                        else:
-                            result = model.predict([x])
-                    else:
-                        result = model.predict([x])
-                        if isinstance(result, list):
-                            result = result[0]
-                    ensemble_results.append(result)
-                if average_fold_results or len(ensemble_results) == 1:
-                    y_pred.append(np.mean(ensemble_results))
-                else:
-                    y_pred.append(ensemble_results)
-
-            return y_pred
+        elif self._model_type in ["fnn"]:
+            if not isinstance(x_pred[0], torch.Tensor):
+                x_pred = [torch.tensor(embedding, dtype=torch.float32) for embedding in x_pred]
+            x_pred = torch.stack([embedding.reshape(-1) for embedding in x_pred])
+            torch.cuda.empty_cache()
 
         else:
             warnings.warn(
                 "Model type not supported yet. Please use either 'svm' or 'rf' as model type. Sryyyyyyyyy.... ")
-        return
+            return
+
+        gc.collect()
+
+        y_pred = []
+        models = self._model  # model(s) always stored as list for ensemble learning
+
+        for model in models:
+            if self._early_stopping is not False and self._model_type == "xgboost":
+                result = model.predict(x_pred, iteration_range=(0, model.best_iteration + 1))
+            elif self._early_stopping is not False and self._model_type == "lightgbm":
+                result = model.predict(x_pred, num_iteration=model.best_iteration_)
+
+            else:
+                result = model.predict(x_pred)
+                if self._model_type in ["fnn"]:
+                    result = result.detach().cpu().numpy().reshape(-1)
+
+            y_pred.append(result)
+
+        if average_fold_results:
+            return np.mean(y_pred, axis=0)
+        else:
+            return y_pred
 
     def score(self, x_val, y_val):
         """Function to retrieve model performance. Only used after applying the models training method"""
@@ -319,9 +393,13 @@ class ActivityPredictor:
         r_squared = []
         meansquarederror = []
 
-        y_pred = self.predict(x_val)
+        y_pred = self.predict(x_val) #output already properly
 
-        ndcg.append(ndcg_score(y_val, y_pred))
+        if isinstance(y_val[0], torch.Tensor):
+            y_val = [y.detach().cpu().numpy() for y in y_val]
+        if isinstance(y_val[0], np.ndarray):
+            y_val = [float(y.item()) if y.size == 1 else float(y.flat[0]) for y in y_val]
+        ndcg.append(ndcg_score(y_pred, y_val))
         pearson.append(pearson_correlation(y_pred, y_val))
         spearman.append(spearman_correlation(y_pred, y_val))
         r_squared.append(r2_score(y_pred, y_val))
@@ -345,18 +423,12 @@ class ActivityPredictor:
         if self._is_trained:
             self._model = new_model
             self._is_trained = is_trained
-            self.score(x_val=self._data_prepared["x_val"], y_val=self._data_prepared["y_val"])
+            self.score(x_val=self._data["x_val"], y_val=self._data["y_val"])
         else:
             warnings.warn(Warning("Train the model first before replacing the trained model - or create a new model"))
 
-    def get_data(self, prepared: Literal[True, False]):
-        if prepared:
-            if self._is_trained:
-                return self._data_prepared
-            else:
-                warnings.warn(Warning("Data has not been prepared for Training. This happens during self.train()"))
-        else:
-            return self._data_raw
+    def get_data(self):
+        return self._data
 
     def save_model(self, filename):
         if len(self._model) == 1:
@@ -378,7 +450,7 @@ class ActivityPredictor:
             raise ValueError("Model has not been trained yet. Train it with the train() method before saving.")
 
         else:
-            if self._model_type in ["svr", "rf", "adaboost", "lightgbm", "linear", "ridge", "lasso"]:
+            if self._model_type in ["svr", "rf", "adaboost", "lightgbm", "linear", "ridge", "lasso", "elastic_net"]:
                 import pickle
                 if not ensemble:
                     with open(f'{outfile}.pkl', 'wb') as f:
@@ -396,6 +468,14 @@ class ActivityPredictor:
                     for i, model in enumerate(self._model):
                         model.save_model(f"{outfile}_{i}.json")
                     print(f'model saved to {out_path}')
+
+            if self._model_type in ["fnn"]:
+                if not ensemble:
+                    torch.save(self._model.state_dict(), f"{outfile}.pt")
+                else:
+                    for i, model in enumerate(self._model):
+                        torch.save(model.state_dict(), f"{outfile}_{i}.pt")
+                print(f'model saved to {out_path}')
 
     def load_model_weights(self):
         pass

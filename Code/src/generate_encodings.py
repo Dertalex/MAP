@@ -5,7 +5,6 @@ import numpy as np
 from typing import Literal, Optional
 import src.Blosum as bl
 import src.georgiev_parameters as gg
-import torch
 from torch_geometric.data import Data
 from Bio.PDB import PDBParser
 
@@ -13,7 +12,7 @@ from Bio.PDB import PDBParser
 
 def generate_graph_encoding(pdb_file, 
                             y, 
-                            features: Literal["one_hot", "georgiev", "blosum45", "blosum50",
+                            node_features: Literal["one_hot", "georgiev", "blosum45", "blosum50",
                                             "blosum62", "blosum80", "blosum90"], 
                             distance_threshold: float = 8.0) -> Data:
 
@@ -33,7 +32,7 @@ def generate_graph_encoding(pdb_file,
 
 
     parser = PDBParser(QUIET=True)
-    structure = parser.get_structure("protein", "example.pdb")
+    structure = parser.get_structure("protein", pdb_file)
 
     residues = []
     features = []
@@ -42,24 +41,24 @@ def generate_graph_encoding(pdb_file,
     for model in structure:
         for chain in model:
             for residue in chain:
-                if is_aa(residue) and "CA" in residue:
+                if "CA" in residue:
                     res_coords.append(residue["CA"].coord)
 
                     #update features for every residue/node
                     f_vector = []
-                    if features == "one_hot":
-                        f_vector = [np.zeros(len(aa_codes))]
-                        f_vector[aa_to_index[res.get_resname()]] = 1
+                    if node_features == "one_hot":
+                        f_vector = np.zeros(len(aa_codes))
+                        f_vector[aa_to_index[residue.get_resname()]] = 1
 
-                    elif features == "georgiev":
+                    elif node_features == "georgiev":
                         for parameter in gg.GEORGIEV_PARAMETERS:
-                            f_vector.append(parameter[res.get_resname()])
+                            f_vector.append(parameter[aa3to1[residue.get_resname()]])
 
-                    elif features in ["blosum45", "blosum50", "blosum62", "blosum80", "blosum90"]:
+                    elif node_features in ["blosum45", "blosum50", "blosum62", "blosum80", "blosum90"]:
                         bl_matrices = [bl.blosum_45, bl.blosum_50, bl.blosum_62, bl.blosum_80, bl.blosum_90]
                         blosum = bl_matrices[["blosum45", "blosum50", "blosum62", "blosum80", "blosum90"].index(features)]
                         for aa in aa_codes:
-                            f_vector.append(blosum[aa3to1[res.get_resname()]][aa3to1[aa]])
+                            f_vector.append(blosum[aa3to1[residue.get_resname()]][aa3to1[aa]])
 
                     features.append(f_vector)
                 else:
@@ -67,6 +66,7 @@ def generate_graph_encoding(pdb_file,
                 
     # Convert coordinates and features to tensors
     coords_tensor = torch.tensor(res_coords, dtype=torch.float)
+    features = np.array(features)
     features_tensor = torch.tensor(features, dtype=torch.float)
 
     # Create edges
@@ -80,7 +80,7 @@ def generate_graph_encoding(pdb_file,
 
     edges = torch.tensor(edge_indeces, dtype=torch.long).t().contiguous()
 
-    return Data(x=features_tensor, edge_index=edges)
+    return Data(x=features_tensor, edge_index=edges, y=y)
 
 
 
@@ -89,7 +89,7 @@ def generate_graph_encoding(pdb_file,
 
 def generate_sequence_encodings(method: Literal[
     "one_hot", "georgiev", "blosum45", "blosum50", "blosum62", "blosum80",
-    "blosum90", "esmc_300m", "esmc_600m"],
+    "blosum90", "esmc_300m", "esmc_600m", "prost_t5"],
                                 sequences: list, esm_batch_size: Optional[int] = None) -> list:
     """
     create one hot encodings from AA sequences. Size of OHE and BLOSUM tensors is determined by the longest sequence in the list.
@@ -162,29 +162,6 @@ def generate_sequence_encodings(method: Literal[
 
     ''' ESM encodings '''
 
-    if method in ["esmc_300m", "esmc_600m"]:
-        import torch
-        from esm.models.esmc import ESMC
-        from esm.sdk.api import ESMProtein, LogitsConfig
-
-        repr_layer = -1
-        representations = []
-
-        client = ESMC.from_pretrained(method).to("cuda")
-
-        for sequence in sequences:
-            protein = ESMProtein(sequence=sequence)
-            protein_tensor = client.encode(protein)
-            logits_output = client.logits(protein_tensor,
-                                          LogitsConfig(sequence=True, return_embeddings=True,
-                                                       return_hidden_states=True))
-
-            mean_embeddings = torch.mean(logits_output.hidden_states, dim=-2)
-            representation = mean_embeddings[repr_layer, :]
-            representations.append(representation)
-
-        return representations
-
     if method in ["esm1b", "esm2_650M", "esm2_8M", "esm2_3B"]:
         sequences = [(i, sequence) for i, sequence in enumerate(sequences)]
 
@@ -241,59 +218,97 @@ def generate_sequence_encodings(method: Literal[
                 encodings.append(token_representations[j, 1: tokens_len - 1].mean(0))
         return encodings
 
-    """ProtTrans Encodings"""
-    if method in ["prostT5", "protT5", "protT5_XL"]:
+    if method in ["esmc_300m", "esmc_600m"]:
+        import torch
+        import tqdm
+        from transformers import AutoModelForMaskedLM
 
+        representations = []
+
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+
+        for method in ["esmc_600m", "esmc_300m"]:
+            if method == "esmc_600m":
+                model_name = "Synthyra/ESMplusplus_large"
+            else:
+                model_name = "Synthyra/ESMplusplus_small"
+
+            # Load model + tokenizer
+            model = AutoModelForMaskedLM.from_pretrained(model_name, trust_remote_code=True).to(device)
+            tokenizer = model.tokenizer
+            model.eval()
+
+            with tqdm.tqdm(total=len(sequences)) as pbar:
+                for sequence in sequences:
+
+                    with torch.no_grad():
+                        tokenized = tokenizer(sequence, return_tensors="pt").to(device)
+                        output = model(**tokenized, output_hidden_states=True)
+
+                    token_embeddings = output.hidden_states  # tuple: one tensor per layer
+
+                    for j, layer in enumerate(token_embeddings): # shape: (batch, seq_len+2, hidden_dim)
+                        residue_embeddings = layer[0, 1:len(sequence)+1, :] # take only amino acids, exclude CLS (0) and EOS (-1)
+                        sequence_embedding = residue_embeddings.mean(0)  # (hidden_dim,)
+                    representations.append(sequence_embedding.cpu())
+                    pbar.update(1)
+
+            return representations
+
+
+    """ProtTrans Encodings"""
+    if method in ["protT5"]:
         from transformers import T5Tokenizer, T5EncoderModel
         import torch
-        import re
 
         if torch.cuda.is_available():
-            device = "cuda"
+            device = torch.device("cuda")
         else:
-            raise Warning("No GPU available, you really don't want to use this on CPU")
+            device = torch.device("cpu")
+            warnings.warn("No GPU available, using CPU (this will be slow)")
 
-        if method == "prostT5":
-            tokenizer = T5Tokenizer.from_pretrained("'Rostlab/prot_t5_xl_half_uniref50-enc', do_lower_case=False")
-            model = T5EncoderModel.from_pretrained("Rostlab/prot_t5_xl_half_uniref50-enc").to(device)
+        # Load model + tokenizer
+        tokenizer = T5Tokenizer.from_pretrained("Rostlab/prot_t5_xl_uniref50", do_lower_case=False)
+        model = T5EncoderModel.from_pretrained("Rostlab/prot_t5_xl_uniref50").to(device)
+        model.eval()
 
-        if method == "proT5_XL":
-            tokenizer = T5Tokenizer.from_pretrained("'Rostlab/prot_t5_xl_half_uniref50-enc', do_lower_case=False")
-            model = T5EncoderModel.from_pretrained("Rostlab/prot_t5_xl_half_uniref50-enc").to(device)
-
-        if method == "protT5":
-            tokenizer = T5Tokenizer.from_pretrained("'Rostlab/prot_t5_xl_half_uniref50-enc', do_lower_case=False")
-            model = T5EncoderModel.from_pretrained("Rostlab/prot_t5_xl_half_uniref50-enc").to(device)
-
-
-def save_encodings(encodings, outpath):
-    is_torch = False
-    is_ndarr = False
-
-    if encodings is None or len(encodings) == 0:
-        print("no encodings provided")
-
-    if not isinstance(encodings[0], np.ndarray):
-        import torch
-        if not isinstance(encodings[0], torch.Tensor):
-            warnings.warn("provided encodings are not in numpy array or torch.Tensor format.")
-        else:
-            is_torch = True
-    else:
-        is_ndarr = True
-
-    if not os.path.exists(outpath):
-        os.makedirs(outpath)
-
-    for i, encoding in enumerate(encodings):
-        log_floor = math.floor(math.log(len(encodings), 10))
-        outfile = os.path.join(outpath, f"{i:0{1 + log_floor}d}")
-        if is_ndarr:
-            np.save(outfile, encoding)
-        if is_torch:
-            torch.save(encoding, outfile)
-    # print(f"Encodings saved to {outpath}")
-
+        representations = []
+        
+        # Process sequences
+        for sequence in sequences:
+            # Prepare sequence (add spaces between amino acids)
+            prepped_seq = " ".join(list(sequence))
+            
+            # Tokenize
+            ids = tokenizer.batch_encode_plus(
+                [prepped_seq],
+                add_special_tokens=True,
+                padding="longest",
+                return_tensors="pt"
+            )
+            
+            input_ids = ids['input_ids'].to(device)
+            attention_mask = ids['attention_mask'].to(device)
+            
+            # Extract embeddings
+            with torch.no_grad():
+                embedding_output = model(input_ids=input_ids, attention_mask=attention_mask)
+            
+            residue_embs = embedding_output.last_hidden_state
+            
+            # Get valid indices (excluding padding and special tokens)
+            valid_indices = torch.where(attention_mask[0, 1:] == 1)[0] + 1
+            
+            if valid_indices.numel() > 0:
+                # Mean pool over valid residues
+                seq_embedding = residue_embs[0, valid_indices].mean(dim=0).cpu()
+            else:
+                warnings.warn(f"Empty sequence tokenization for sequence: {sequence[:20]}...")
+                seq_embedding = torch.zeros(residue_embs.shape[2], dtype=torch.float32)
+            
+            encodings.append(seq_embedding)
+        
+        return encodings
 
 def load_encodings(encodings_folder):
     """loads all MAP encodings from a folder"""

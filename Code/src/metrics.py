@@ -1,7 +1,12 @@
 import numpy as np
 from math import sqrt
+import torch
+import torch.nn as nn
+from torch.nn import BCEWithLogitsLoss, MarginRankingLoss
+import torch.nn.functional as F
 
-#Performance evaluation
+
+# Performance evaluation
 
 def pearson_correlation(y_preds, y_trues):
     """
@@ -26,7 +31,7 @@ def pearson_correlation(y_preds, y_trues):
         print("Error: Input lists (y_preds and y_trues) must have the same length.")
         return float('nan')
 
-    n = n_preds # Both lengths are equal here
+    n = n_preds  # Both lengths are equal here
 
     if n < 2:
         print("Error: Pearson correlation coefficient requires at least 2 data points.")
@@ -46,30 +51,32 @@ def pearson_correlation(y_preds, y_trues):
     sum_sq_dev_y_preds = 0
     sum_sq_dev_y_trues = 0
     for i in range(n):
-        sum_sq_dev_y_preds += (y_preds[i] - mean_y_preds)**2
-    for i in range(n): # Corrected loop to be independent
-        sum_sq_dev_y_trues += (y_trues[i] - mean_y_trues)**2
+        sum_sq_dev_y_preds += (y_preds[i] - mean_y_preds) ** 2
+    for i in range(n):  # Corrected loop to be independent
+        sum_sq_dev_y_trues += (y_trues[i] - mean_y_trues) ** 2
 
     denominator = sqrt(sum_sq_dev_y_preds * sum_sq_dev_y_trues)
 
     if denominator == 0:
-        print("Warning: Cannot calculate Pearson correlation. One or both datasets have zero variance (all values are identical).")
+        print(
+            "Warning: Cannot calculate Pearson correlation. One or both datasets have zero variance (all values are identical).")
         return float('nan')
 
     pearson_r = numerator / denominator
 
     return float(pearson_r)
 
+
 def _get_ranks(data):
     """
     Assigns ranks to the elements in a list, handling ties by assigning the average rank.
     """
-    if not data:
+    if len(data) == 0:
         return []
 
     # Create a list of (value, original_index) tuples
     indexed_data = sorted([(value, i) for i, value in enumerate(data)])
-    
+
     ranks = [0] * len(data)
     i = 0
     while i < len(indexed_data):
@@ -77,12 +84,12 @@ def _get_ranks(data):
         # Find all tied values
         while j < len(indexed_data) and indexed_data[j][0] == indexed_data[i][0]:
             j += 1
-        
+
         # Calculate the average rank for the tied values
         # Ranks are 1-based, so for 0-indexed original positions, (i+1 + j)/2
         # However, for the average rank, we take the average of 0-indexed positions
         # which effectively gives the average of (i, i+1, ..., j-1)
-        avg_rank = (i + j - 1) / 2 + 1 # Convert to 1-based average rank
+        avg_rank = (i + j - 1) / 2 + 1  # Convert to 1-based average rank
 
         # Assign the average rank to all tied elements
         for k in range(i, j):
@@ -90,6 +97,7 @@ def _get_ranks(data):
             ranks[original_index] = avg_rank
         i = j
     return ranks
+
 
 def spearman_correlation(y_preds, y_trues):
     """
@@ -108,6 +116,9 @@ def spearman_correlation(y_preds, y_trues):
                - One or both lists (after ranking) have zero variance (all elements are identical).
                  This specifically covers cases where all y_preds or y_trues are identical.
     """
+    y_preds = [float(y) for y in y_preds]
+    y_trues = [float(y) for y in y_trues]
+
     n_preds = len(y_preds)
     n_trues = len(y_trues)
 
@@ -115,7 +126,7 @@ def spearman_correlation(y_preds, y_trues):
         print("Error: Input lists (y_preds and y_trues) must have the same length for Spearman correlation.")
         return float('nan')
 
-    n = n_preds # Both lengths are equal here
+    n = n_preds  # Both lengths are equal here
 
     if n < 2:
         print("Error: Spearman correlation coefficient requires at least 2 data points.")
@@ -136,14 +147,15 @@ def spearman_correlation(y_preds, y_trues):
     # 1. Get ranks for both lists
     ranks_y_preds = _get_ranks(y_preds)
     ranks_y_trues = _get_ranks(y_trues)
-    
+
     # 2. Calculate Pearson correlation on the ranks
     # The pearson_correlation function already handles cases where the ranks might have zero variance
     # (e.g., if all y_preds were identical, ranks_y_preds would all be the same, resulting in NaN)
     spearman_r = pearson_correlation(ranks_y_preds, ranks_y_trues)
 
     return spearman_r
-    
+
+
 def r2_score(y_preds, y_trues):
     y_trues = [float(y) for y in y_trues]
     y_preds = [float(y) for y in y_preds]
@@ -154,6 +166,7 @@ def r2_score(y_preds, y_trues):
 
     return 1 - (rss / (tss + EPSILON)) if tss == 0 else 1 - (rss / tss)
 
+
 def rmse(y_preds, y_trues):
     y_preds = [float(y) for y in y_preds]
     y_trues = [float(y) for y in y_trues]
@@ -162,15 +175,15 @@ def rmse(y_preds, y_trues):
     mse = sum((yt - yp) ** 2 for yp, yt in zip(y_preds, y_trues)) / n
     return sqrt(mse + EPSILON) if mse == 0 else sqrt(mse)
 
+
 def mse(y_preds, y_trues):
     y_preds = [float(y) for y in y_preds]
     y_trues = [float(y) for y in y_trues]
     n = len(y_preds)
     return sum((yt - yp) ** 2 for yp, yt in zip(y_preds, y_trues)) / n
-    
+
 
 def ndcg_score(y_trues, y_preds):
-
     y_trues = np.asarray(y_trues)
     y_preds = np.asarray(y_preds)
 
@@ -180,7 +193,6 @@ def ndcg_score(y_trues, y_preds):
     if not y_trues.size:
         return 0.0
 
-
     predicted_rank_indices = np.argsort(y_preds)[::-1]  # Get indices that would sort y_preds in descending order
     ranked_true_fitnesses = y_trues[predicted_rank_indices]
 
@@ -188,12 +200,12 @@ def ndcg_score(y_trues, y_preds):
     dcg = 0.0
     for i, fitness in enumerate(ranked_true_fitnesses):
         dcg += fitness / np.log2(i + 1 + 1)
-        
+
     perfect_ranked_true_fitnesses = np.atleast_1d(np.sort(y_trues)[::-1])
 
     idcg = 0.0
     for i, fitness in enumerate(perfect_ranked_true_fitnesses):
-        idcg += fitness / np.log2(i + 2) # Same denominator logic as above
+        idcg += fitness / np.log2(i + 2)  # Same denominator logic as above
 
     # 3. Calculate NDCG
     if idcg == 0.0:
@@ -202,17 +214,59 @@ def ndcg_score(y_trues, y_preds):
         ndcg = dcg / idcg
         return ndcg
 
+
 # custom training metrics for lightgbm/xgboost
 def spearman_lightgbm(y_trues, y_preds):
     return 'rho', spearman_correlation(y_trues, y_preds), True
 
+
 def ndcg_lightgbm(y_trues, y_preds):
     return 'ndcg', ndcg_score(y_trues, y_preds), True
 
+
 def spearman_xgboost(y_trues, y_preds):
     return 'rho', spearman_correlation(y_trues, y_preds)
+
 
 def ndcg_xgboost(y_trues, y_preds):
     return 'ndcg', ndcg_score(y_trues, y_preds)
 
 
+class ListMleLoss(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.number_permutations = 1
+        self.epsilon = 0.0000000001
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    def calculate_rank_loss(self, outputs, config_runtime):
+        bs, num_configs = outputs.shape
+
+        # Shuffle to break ties
+        random_indices = torch.randperm(num_configs, device=outputs.device)
+        y_pred_shuffled = outputs[:, random_indices]
+        y_true_shuffled = config_runtime[:, random_indices]
+
+        # Sort labels descending
+        y_true_sorted, indices = y_true_shuffled.sort(descending=True, dim=-1)
+        preds_sorted = torch.gather(y_pred_shuffled, 1, indices)
+
+        # Stable log-cumsum-exp
+        log_cumsums = torch.logcumsumexp(preds_sorted, dim=1)
+
+        # Observation loss
+        observation_loss = log_cumsums - preds_sorted
+
+        # Reduce: sum per slate, mean across batch
+        return torch.mean(torch.sum(observation_loss, dim=1))
+
+    def forward(self,
+                outputs: torch.Tensor,
+                config_runtime: torch.Tensor,
+                ):
+        outputs_reshaped = outputs.view(1, -1)
+        config_runtime_reshaped = config_runtime.view(1, -1)
+        loss = 0
+        for _ in range(self.number_permutations):
+            loss += self.calculate_rank_loss(outputs, config_runtime)
+        return loss / self.number_permutations
