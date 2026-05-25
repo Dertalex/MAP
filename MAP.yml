@@ -1,0 +1,28 @@
+name: MAP
+channels:
+  - conda-forge
+  - defaults
+  - pytorch
+  - nvidia
+  - pyg
+
+dependencies:
+  - python=3.13
+  - numpy
+  - pandas
+  - plotly
+  - pip
+  - xgboost
+  - lightgbm
+  - tqdm
+  - joblib
+
+  - pip:
+      - scikit-learn
+      - optuna
+      - einops
+      - biopython
+      - torch-geometric
+      - transformers
+      - kaleido
+
